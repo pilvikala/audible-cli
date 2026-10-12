@@ -26,7 +26,7 @@ ENTRYPOINT = REPO_ROOT / "pyi_entrypoint.py"
 PLUGIN_DIR = REPO_ROOT / "plugin_cmds"
 
 DEFAULT_LIBRARY_FILE = REPO_ROOT / "library.json"
-DEFAULT_DEST_DIR = "/run/media/michal/movies/audiobooks"
+DEFAULT_DEST_DIR = "/home/michal/Downloads/audiobooks"
 
 # Characters not allowed in filenames on common filesystems (Windows, plus
 # "/" for POSIX).
