@@ -3,7 +3,9 @@
 
 Runs `pyi_entrypoint.py library export --format json` to fetch the live
 library, then reduces each entry down to the {"id", "author", "title"}
-shape that download_all.py expects.
+shape that download_all.py expects. The output also records the
+--start-date and --end-date the library was fetched with (null if unset):
+    {"start_date": ..., "end_date": ..., "books": [...]}
 """
 
 import argparse
@@ -88,10 +90,15 @@ def main() -> int:
         raw_books = json.loads(raw_output.read_text(encoding="utf-8"))
 
     books = simplify(raw_books)
+    library = {
+        "start_date": args.start_date,
+        "end_date": args.end_date,
+        "books": books,
+    }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as outfile:
-        json.dump(books, outfile, indent=4)
+        json.dump(library, outfile, indent=4)
 
     print(f"Wrote {len(books)} book(s) to {args.output}")
     return 0

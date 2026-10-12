@@ -1,0 +1,16 @@
+{
+    "start_date": "2026-08-01",
+    "end_date": null,
+    "books": [
+        {
+            "id": "B002V8DKY2",
+            "author": "Michael Connelly",
+            "title": "A Darkness More Than Night"
+        },
+        {
+            "id": "B0077DEH7A",
+            "author": "Stephen King",
+            "title": "The Stand"
+        }
+    ]
+}

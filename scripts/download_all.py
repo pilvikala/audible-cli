@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Download every audiobook listed in library.json using audible-cli.
 
-Reads a JSON file of the form:
-    [{"id": "ASIN", "author": "...", "title": "..."}, ...]
-and invokes this repo's `pyi_entrypoint.py download` command once per
+Reads a JSON file of the form written by get_library.py:
+    {"start_date": ..., "end_date": ...,
+     "books": [{"id": "ASIN", "author": "...", "title": "..."}, ...]}
+(a bare list of books, the older format, is also accepted) and invokes this repo's `pyi_entrypoint.py download` command once per
 book, downloading each into its own "<author> - <title>" subfolder under
 the destination directory. Each downloaded AAX/AAXC file is then converted
 to .m4b with ffmpeg, using this repo's `decrypt` plugin command (which
@@ -45,14 +46,24 @@ def book_folder_name(book: dict) -> str:
     return f"{author} - {title}"
 
 
-def load_library(library_file: Path) -> list[dict]:
+def load_library(library_file: Path) -> dict:
+    """Return the library as {"start_date", "end_date", "books"}, accepting
+    both the current object format and the older bare list of books."""
     with library_file.open("r", encoding="utf-8") as f:
-        books = json.load(f)
+        library = json.load(f)
 
-    if not isinstance(books, list):
-        raise ValueError(f"{library_file} does not contain a JSON list")
+    if isinstance(library, list):
+        library = {"start_date": None, "end_date": None, "books": library}
 
-    return books
+    if not isinstance(library, dict) or not isinstance(library.get("books"), list):
+        raise ValueError(
+            f"{library_file} must contain a list of books or an object "
+            'with a "books" list'
+        )
+
+    library.setdefault("start_date", None)
+    library.setdefault("end_date", None)
+    return library
 
 
 def parse_args() -> argparse.Namespace:
@@ -212,7 +223,8 @@ def convert_book_to_m4b(book_dir: Path, delete_source: bool, retries: int, delay
 def main() -> int:
     args = parse_args()
 
-    books = load_library(args.library_file)
+    library = load_library(args.library_file)
+    books = library["books"]
     if not books:
         print(f"No books found in {args.library_file}", file=sys.stderr)
         return 1
@@ -240,7 +252,13 @@ def main() -> int:
     if args.cover:
         base_command.append("--cover")
 
-    print(f"Downloading {len(books)} book(s) to {dest_dir}")
+    date_range = ", ".join(
+        f"{name} {library[key]}"
+        for name, key in (("from", "start_date"), ("until", "end_date"))
+        if library[key]
+    )
+    print(f"Downloading {len(books)} book(s) to {dest_dir}"
+          + (f" (added {date_range})" if date_range else ""))
 
     if args.convert and not args.dry_run:
         fetch_activation_bytes()
