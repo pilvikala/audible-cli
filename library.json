@@ -1,5 +1,5 @@
 {
-    "start_date": "2026-08-01",
+    "start_date": "2026-09-01",
     "end_date": null,
     "books": [
         {
@@ -8,9 +8,9 @@
             "title": "A Darkness More Than Night"
         },
         {
-            "id": "B0077DEH7A",
-            "author": "Stephen King",
-            "title": "The Stand"
+            "id": "B0HDFGKSTL",
+            "author": "Benjamin Percy, Andy Weir",
+            "title": "Exoplanet"
         }
     ]
 }
