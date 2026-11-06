@@ -103,11 +103,24 @@ Without the extra, audible-cli still works using the pure-Python fallback.
 Don’t want to install Python?  
 Prebuilt binaries are available on the [releases page](https://github.com/mkb79/audible-cli/releases).
 
-> ℹ️ The prebuilt binaries already **bundle the Rust-accelerated `cryptography` backend** (statically linked, no extra setup) — so cryptographic operations are fast out of the box.
+> ℹ️ The prebuilt binaries bundle an accelerated crypto backend, with no
+> extra setup — the Rust-based `cryptography` everywhere except Windows on
+> arm64, which uses `pycryptodome` because `cryptography` publishes no wheel
+> for it. Either way you are not on the slow pure-Python fallback.
 
-- **Windows:** [onedir](https://github.com/mkb79/audible-cli/releases/latest/download/audible_win_dir.zip) (recommended), [onefile](https://github.com/mkb79/audible-cli/releases/latest/download/audible_win.zip)  
-- **Linux:** [Ubuntu 22.04](https://github.com/mkb79/audible-cli/releases/latest/download/audible_linux_ubuntu_22_04.zip), [latest](https://github.com/mkb79/audible-cli/releases/latest/download/audible_linux_ubuntu_latest.zip)  
-- **macOS:** [onefile](https://github.com/mkb79/audible-cli/releases/latest/download/audible_mac.zip), [onedir](https://github.com/mkb79/audible-cli/releases/latest/download/audible_mac_dir.zip)  
+**Windows** — [x86_64 onedir](https://github.com/mkb79/audible-cli/releases/latest/download/audible_win_x86_64_dir.zip) (recommended), [x86_64 onefile](https://github.com/mkb79/audible-cli/releases/latest/download/audible_win_x86_64.zip)  
+Also on ARM: [arm64 onedir](https://github.com/mkb79/audible-cli/releases/latest/download/audible_win_arm64_dir.zip), [arm64 onefile](https://github.com/mkb79/audible-cli/releases/latest/download/audible_win_arm64.zip)
+
+**macOS** — Apple silicon only: [onefile](https://github.com/mkb79/audible-cli/releases/latest/download/audible_mac_arm64.zip), [onedir](https://github.com/mkb79/audible-cli/releases/latest/download/audible_mac_arm64_dir.zip)  
+On an Intel Mac, install from PyPI instead: `pipx install audible-cli`
+
+**Linux** — take these: [x86_64](https://github.com/mkb79/audible-cli/releases/latest/download/audible_linux_ubuntu_22_04_x86_64.zip), [arm64](https://github.com/mkb79/audible-cli/releases/latest/download/audible_linux_ubuntu_22_04_arm64.zip)  
+Built on Ubuntu 22.04, so they need glibc 2.35 — Ubuntu 22.04, Debian 12, RHEL 9 and anything newer.  
+There are also builds on a 24.04 base ([x86_64](https://github.com/mkb79/audible-cli/releases/latest/download/audible_linux_ubuntu_24_04_x86_64.zip), [arm64](https://github.com/mkb79/audible-cli/releases/latest/download/audible_linux_ubuntu_24_04_arm64.zip)). They need glibc 2.38 and so reach fewer systems; take one only if you have a reason to.
+
+> ℹ️ The download names now carry the architecture. The old names without one
+> (`audible_mac.zip`, `audible_win.zip` and the rest) are still published
+> alongside and will be dropped after 15 November 2026.
 
 ⚠️ *On Windows, prefer the **onedir** build for faster startup.*
 
@@ -244,6 +257,70 @@ audible -p "mypassword" download --asin <ASIN>
 
 ---
 
+## 🤖 Continuous integration (GitHub Actions)
+
+`audible-cli` can run headless in CI, for example to export your library on a
+schedule. The [`setup-audible-cli`](https://github.com/mkb79/setup-audible-cli)
+action installs `audible-cli` and configures a minimal, ephemeral Audible
+authentication on the runner, so later steps can run `audible` commands.
+
+Signed Audible API requests need only two values from your local `auth.json`, so
+there is no need to upload the whole config directory. If you have not
+authenticated yet, do it once locally with `audible quickstart` (or
+`audible manage auth-file add`); this writes an `auth.json` into your config
+directory. The two values a runner needs are:
+
+- `adp_token`
+- `device_private_key` (a PEM block)
+
+Add them as repository **secrets** and your marketplace as a plain **variable**.
+With [`gh`](https://cli.github.com/) and `jq` you can read both straight from
+`auth.json`:
+
+```shell
+jq -r .device_private_key auth.json | gh secret set AUDIBLE_DEVICE_PRIVATE_KEY
+jq -r .adp_token          auth.json | gh secret set AUDIBLE_ADP_TOKEN
+gh variable set AUDIBLE_COUNTRY_CODE --body de   # your Audible marketplace
+```
+
+Then the workflow is just:
+
+```yaml
+name: Audible export
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * *"
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: mkb79/setup-audible-cli@v1
+        with:
+          adp-token: ${{ secrets.AUDIBLE_ADP_TOKEN }}
+          device-private-key: ${{ secrets.AUDIBLE_DEVICE_PRIVATE_KEY }}
+          country-code: ${{ vars.AUDIBLE_COUNTRY_CODE }}
+
+      - run: audible library export --format json --output library.json
+```
+
+Only these two values are stored as secrets; access and refresh tokens, cookies,
+and account details are never uploaded, and the runner's auth files exist only
+for the lifetime of the job. See the
+[`setup-audible-cli`](https://github.com/mkb79/setup-audible-cli) action for its
+full set of inputs and outputs.
+
+> ⚠️ These credentials grant access to your Audible account. Run authenticated
+> workflows only from trusted branches, scheduled runs, or manual dispatches,
+> never from arbitrary pull-request code.
+
+A live example: [earshot](https://github.com/DanMat/earshot) refreshes its data
+from Audible on a daily schedule using this action.
+
+---
+
 ## 🧩 Built-in commands
 
 - **activation-bytes** → Manage DRM activation keys  
@@ -322,6 +399,50 @@ audible -v error download --all
 
 Levels: `debug`, `info`, `warning`, `error`, `critical`  
 Default: `info`
+
+---
+
+## 🔀 Output and diagnostics
+
+Every command keeps its two streams apart. **stdout** carries the result you
+asked for: an API response, a list of titles, the activation bytes. **stderr**
+carries everything else — progress, warnings, errors, and the questions an
+interactive command asks. So a pipe only ever receives the payload:
+
+```shell
+audible api library | jq '.items[].title'
+audible library list > titles.txt
+```
+
+To keep a record of a run, use `--log-file` rather than redirecting a stream.
+It writes the same log with a timestamp, module and line, follows `--verbosity`,
+and appends across runs:
+
+```shell
+audible --log-file audible.log download --all
+```
+
+Colour follows the terminal, and honours `NO_COLOR` and `FORCE_COLOR`.
+
+Questions go to stderr too, so `2>` on an interactive command hides the
+question while the command waits for an answer. Keep that stream on screen
+while answering. `--log-file` is no substitute there: it records what the
+command has to say about its work, not the conversation, and deliberately
+so — a password or a captcha answer has no business in a file on disk.
+
+---
+
+## 📊 Progress display
+
+`download` reserves the bottom rows of the terminal for one progress line per job
+plus one for the queue. Log output scrolls above them and stays in the scrollback
+when the command finishes.
+
+Resizing the window during a download can leave a copy of the old lines standing
+above the new ones until the next log line scrolls them away. A program cannot see
+what the terminal did with rows it has already drawn, so this is a limit shared by
+every tool that pins progress without taking the whole screen. Pass `--no-progress`
+to turn the display off.
 
 ---
 

@@ -4,55 +4,100 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [0.6.0] - 2026-09-01
+
+### Breaking
+
+- Log output now goes to stderr, so stdout carries only what a command produces; `audible download … > log.txt` needs `2>` or the new `--log-file` from now on (#306)
+- `audible manage auth-file add` asks whether the auth file should have a password. The option was there but was never offered, so anyone going through the questions got an unencrypted file, while `quickstart` asked. A script that passed every other option now has to pass `--password ''` as well, to say that it wants none (#313, #315)
 
 ### Fixed
 
-- `build_auth_file()` no longer raises an `AttributeError` when its `filename` is passed as a `str`, which its signature allows. The failure happened after the login had already registered the device, so the registration was lost without the auth file being written
-- The `convert-oa-file` plugin works again. It has failed to even load since v0.2 because it imported `pass_session` from the wrong module, and behind that sat a tuple passed to `pathlib.Path()`, a call to a `Session` method that does not exist, an expiry read as seconds although OpenAudible writes milliseconds, a `KeyError` on cookie fields that are optional, and a profile name from the converted file that could write outside the config directory
+- `audible manage auth-file add --external-login` no longer asks for an Audible username and password. The browser does the login, and the two values never reached it (#314, #315)
+- `audible manage auth-file remove` with a wrong password now says the file does not open, instead of a traceback about PKCS7 padding (#313, #315)
+- `--version` no longer exits 1 with the error glued to the version when the update check cannot reach GitHub (#309)
+- The deprecated `resolve_podcats()` handed back a coroutine instead of awaiting it, so it warned and then did nothing (#305)
+- `--resolve-podcasts` now takes every parent podcast out of the library, not every second one where several sit next to each other (#305)
+- A podcast episode that is already downloaded no longer costs a voucher on every run (#299)
+- A cover size a title does not offer is reported as a warning, not an error (#300)
+- A request to Audible's CDE host is tried up to three times when it gets no answer (#298)
+- A failed download job now names the command, the title and the ASIN (#298)
+- AAXC downloads of podcast episodes are no longer rejected over their `audio/mp3` content type (#297)
+- The content type is compared by its media type, so parameters and casing no longer decide the outcome (#297)
+
+### Changed
+
+- Nine remaining status messages became log messages, so `--verbosity` reaches them too (#306)
+- `--version` prints the version alone; the update notice goes to stderr (#306)
+- Prompts and the sentences explaining them moved to stderr with the rest, so a redirected stdout no longer swallows half of `quickstart` (#306)
+- Progress bars now hold their line: a ruled block at the bottom of the terminal with one numbered line per worker and one for the queue, which follows the window through a resize and keeps the queue line when there is no room for the rest; `--no-progress` turns it off (#302)
+- A title too long for the window loses its middle instead of the bar and the counts it was pushing off the line (#302)
+
+### Added
+
+<<<<<<< HEAD
+- `resolve_podcasts()` on `Library` and `Catalog` takes a `remove_parents` argument, for callers that want the episodes without the shows they came from (#305)
+=======
+- `audible manage auth-file encrypt` puts a password on an auth file that has none. Whatever is not given is asked for, so a password need not be typed where the shell keeps it, and a script that passes both options is asked nothing. It says so and changes nothing when the file is not an auth file, when it is encrypted already, or when it has a second name in the file system. The rewritten file keeps the permissions it had, so a decrypted one is as readable to others as it was before it was encrypted (#313, #315)
+- `audible manage auth-file decrypt` takes the password off again, asking and refusing the same way (#313, #315)
+- `--log-file PATH` writes the log to a file as well, with timestamp, module and line (#306)
+- `NO_COLOR` and `FORCE_COLOR` decide whether diagnostics are coloured (#306)
+>>>>>>> master
+- Standalone builds for arm64 on Linux and Windows; the macOS build stays Apple silicon only (#296)
+- Release download names now carry the architecture, for example `audible_win_arm64.zip`; the previous names stay until 15 November 2026 (#296)
+- A `pycryptodome` extra for platforms `cryptography` publishes no wheel for (#296)
+- Documentation for running audible-cli in CI with GitHub Actions via the `setup-audible-cli` action, storing only the two device credentials needed for ADP signing (#303)
+
+## [0.5.1] - 2026-08-15
+
+### Fixed
+
+- `build_auth_file()` no longer raises an `AttributeError` when its `filename` is passed as a `str` (#273)
+- The `convert-oa-file` plugin works again, after failing to even load since v0.2 (#286)
+- The size of a finished audiobook download is checked again (#291)
 
 ## [0.5.0] - 2026-08-05
 
 ### Breaking
 
-- `parse_api_datetime()` and `datetime_type` now return timezone-aware UTC values instead of naive ones. Plugins comparing them against naive datetimes raise `TypeError`, and `.isoformat()` output gains a `+00:00` suffix (#266)
+- `parse_api_datetime()` and `datetime_type` now return timezone-aware UTC values instead of naive ones, so plugins comparing them against naive datetimes raise `TypeError` (#266)
 
 ### Changed
 
-- API timestamps, library date filters and voucher deadlines are now timezone-aware UTC; naive `--start-date`/`--end-date` input is interpreted as UTC, as the option help already stated (#266)
+- API timestamps, library date filters and voucher deadlines are now timezone-aware UTC; naive `--start-date`/`--end-date` input is interpreted as UTC (#266)
 - Replaced `datetime.utcnow()` and `datetime.utcfromtimestamp()`, deprecated since Python 3.12 (#266)
 - Without `--ignore-errors`, the download command now really aborts on the first failure: running downloads finish, queued ones are skipped (#235)
-- The download command exits non-zero when a download job raised an error, also with `--ignore-errors`. Failures that are only logged, such as an unknown ASIN or a download rejected by its HTTP status, still exit zero for now (#256)
-- `--jobs` now rejects values below 1 instead of accepting `0`, which queued work that no consumer would ever pick up (#235)
+- The download command exits non-zero when a download job raised an error, also with `--ignore-errors`; failures that are only logged, such as an unknown ASIN, still exit zero (#256)
+- `--jobs` now rejects values below 1 instead of accepting `0` (#235)
 
 ### Fixed
 
-- Accept API timestamps with and without fractional seconds, fixing the `--start-date`/`--end-date` crash on podcast episodes and the mirror-image crash in `is_published()` (#264)
-- Keep items whose date cannot be determined instead of crashing with an `AttributeError`, when a date filter is active and an item carries no `library_status` (#268)
-- Skip the voucher refresh check when `refresh_date` is empty or null rather than only when the key is absent, instead of raising a `TypeError` (#268)
-- Treat an unknown `publication_datetime` as published rather than crashing, and let `ItemNotPublished` report the ASIN without a countdown when no usable date is available (#268)
-- Reach `LicenseDenied` and `NoDownloadUrl` as intended when `license_denial_reasons`, `content_metadata` or `content_url` are null, instead of raising a `TypeError` or `AttributeError` (#268)
-- `audible manage config edit` no longer crashes with `TypeError: 'PosixPath' object is not iterable`; `click.edit()` accepts a `str` or an iterable of them, but not a `pathlib.Path` (#248)
-- The download command no longer hangs forever after failed downloads. A failing job killed its consumer, and once every `--jobs` consumer had died the queue was never drained (#235, #239)
+- Accept API timestamps with and without fractional seconds, fixing the `--start-date`/`--end-date` crash on podcast episodes (#264)
+- Keep items whose date cannot be determined instead of crashing with an `AttributeError` (#268)
+- Skip the voucher refresh check when `refresh_date` is empty or null, not only when the key is absent (#268)
+- Treat an unknown `publication_datetime` as published rather than crashing (#268)
+- Reach `LicenseDenied` and `NoDownloadUrl` as intended when `license_denial_reasons`, `content_metadata` or `content_url` are null (#268)
+- `audible manage config edit` no longer crashes with `TypeError: 'PosixPath' object is not iterable` (#248)
+- The download command no longer hangs forever after failed downloads (#235, #239)
 
 ## [0.4.0] - 2026-07-20
 
 ### Added
 
-- The `--page-size` option as a replacement for the now deprecated `--bunch-size` option.
-- Optional `cryptography` extra (`pip install "audible-cli[cryptography]"`) that enables audible's Rust-accelerated crypto backend for faster cryptographic operations (activation bytes, AAX/AAXC decryption).
-- Prebuilt release binaries now bundle the Rust-accelerated `cryptography` backend, statically linked via PyInstaller, so the standalone executables benefit from it out of the box.
+- The `--page-size` option as a replacement for the now deprecated `--bunch-size` option (#241)
+- Optional `cryptography` extra (`pip install "audible-cli[cryptography]"`) that enables audible's Rust-accelerated crypto backend (#263)
+- Prebuilt release binaries now bundle the Rust-accelerated `cryptography` backend, statically linked via PyInstaller (#263)
 
 ### Changed
 
-- The `--bunch-size` option is now deprected and will be replaced with option `--page-size` some releases later.
-- Raised the minimum supported Python to `>=3.11,<3.15` (dropped Python 3.10, added 3.14).
-- Bumped `audible` to `>=0.11.0` and `httpx` to `>=0.27.2,<0.29`.
-- Raised minimum versions for `aiofiles`, `click`, `Pillow`, `tabulate`, `tqdm`, `questionary`, `packaging`, and `colorama`.
+- The `--bunch-size` option is now deprecated and will be replaced with option `--page-size` some releases later (#241)
+- Raised the minimum supported Python to `>=3.11,<3.15` (dropped Python 3.10, added 3.14) (#263)
+- Bumped `audible` to `>=0.11.0` and `httpx` to `>=0.27.2,<0.29` (#263)
+- Raised minimum versions for `aiofiles`, `click`, `Pillow`, `tabulate`, `tqdm`, `questionary`, `packaging`, and `colorama` (#263)
 
 ### Fixed
 
-- Allow the `audio/mp4` content type when downloading audiobooks, so AAX/AAXC downloads are no longer rejected when Audible responds with `audio/mp4`.
+- Allow the `audio/mp4` content type when downloading audiobooks (#255)
 
 ## [0.3.3] - 2025-08-14
 

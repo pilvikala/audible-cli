@@ -6,10 +6,14 @@ from enum import Enum, auto
 from typing import Any, Literal, NamedTuple
 
 import aiofiles
-import click
 import httpx
-import tqdm
 from aiofiles.os import path, unlink
+
+from .progress import (
+    DockedProgressBar,
+    progress_disabled,
+    take_progressbar,
+)
 
 
 FileMode = Literal["ab", "wb"]
@@ -18,6 +22,7 @@ logger = logging.getLogger("audible_cli.downloader")
 
 ACCEPT_RANGES_HEADER = "Accept-Ranges"
 ACCEPT_RANGES_NONE_VALUE = "none"
+CONTENT_ENCODING_HEADER = "Content-Encoding"
 CONTENT_LENGTH_HEADER = "Content-Length"
 CONTENT_TYPE_HEADER = "Content-Type"
 MAX_FILE_READ_SIZE = 3 * 1024 * 1024
@@ -170,9 +175,30 @@ async def check_target_file_status(
     return Status.Success
 
 
+def _is_content_encoded(response: ResponseInfo | None) -> bool:
+    if response is None:
+        return False
+    encoding = response.headers.get(CONTENT_ENCODING_HEADER, "")
+    return encoding.strip().lower() not in ("", "identity")
+
+
 async def check_download_size(
-    tmp_file: File, target_file: File, head_response: ResponseInfo, **kwargs: Any
+    tmp_file: File,
+    target_file: File,
+    head_response: ResponseInfo,
+    response: ResponseInfo | None = None,
+    **kwargs: Any
 ) -> Status:
+    """Compare what landed on disk with the length that was announced.
+
+    Skipped for an encoded transfer: Content-Length may then describe the
+    encoded bytes while what reaches the file may have been decoded on the
+    way, so the two are not reliably comparable and the comparison could
+    reject a sound download.
+    """
+    if _is_content_encoded(head_response) or _is_content_encoded(response):
+        return Status.Success
+
     tmp_file_size = await tmp_file.get_size()
     content_length = head_response.content_length
 
@@ -185,7 +211,7 @@ async def check_download_size(
                 content_length,
                 tmp_file_size
             )
-        return Status.DownloadSizeMismatch
+            return Status.DownloadSizeMismatch
 
     return Status.Success
 
@@ -201,6 +227,20 @@ async def check_status_code(
     return Status.Success
 
 
+def _media_type(content_type: str | None) -> str | None:
+    """Everything before the first semicolon, trimmed and lowercased.
+
+    Parameters and casing are the server's to choose, and `audio/mpeg` and
+    `Audio/MPEG; charset=binary` name the same thing, so comparing the
+    header as it arrived turns that into a rejected download. This does not
+    validate the syntax: an empty header and one that is only parameters
+    both come back empty, and a missing one stays None.
+    """
+    if content_type is None:
+        return None
+    return content_type.split(";")[0].strip().lower()
+
+
 async def check_content_type(
     response: ResponseInfo, target_file: File, tmp_file: File,
     expected_types: list[str], **kwargs: Any
@@ -208,7 +248,11 @@ async def check_content_type(
     if not expected_types:
         return Status.Success
 
-    if response.content_type not in expected_types:
+    accepted = {m for m in map(_media_type, expected_types) if m}
+    media_type = _media_type(response.content_type)
+    # A header that is absent or names nothing matches nothing, whatever a
+    # caller may have put in its list
+    if not media_type or media_type not in accepted:
         content = await tmp_file.read_text_content()
         logger.error(
             "Error downloading %s. Wrong content type. Expected type(s): %s; Got: %s; "
@@ -232,7 +276,7 @@ def _status_for_message(message: str) -> Status:
 async def check_status_for_message(
     response: ResponseInfo, tmp_file: File, **kwargs: Any
 ) -> Status:
-    if response.content_type and "text" in response.content_type:
+    if "text" in (_media_type(response.content_type) or ""):
         length = response.content_length or await tmp_file.get_size()
         if length <= MAX_FILE_READ_SIZE:
             message = await tmp_file.read_text_content()
@@ -259,25 +303,28 @@ class DummyProgressBar:
     def update(self, *args, **kwargs):
         pass
 
+    def close(self):
+        # Callers release a bar by closing it, and a bar that shows nothing
+        # still has to accept that
+        pass
+
 
 def get_progressbar(
     destination: pathlib.Path, total: int | None, start: int = 0
-) -> tqdm.tqdm | DummyProgressBar:
-    if total is None:
+) -> DockedProgressBar | DummyProgressBar:
+    if total is None or progress_disabled():
         return DummyProgressBar()
 
-    description = click.format_filename(destination, shorten=True)
-    progressbar = tqdm.tqdm(
-        desc=description,
-        total=total,
-        unit="B",
-        unit_scale=True,
-        unit_divisor=1024
-    )
-    if start > 0:
-        progressbar.update(start)
+    docked = take_progressbar(destination, total=total, start=start)
+    if docked is not None:
+        return docked
 
-    return progressbar
+    # No row at all: no terminal, one without cursor control, a Windows
+    # console that will not take escape sequences, or more downloads at once
+    # than rows were reserved for. A bar drawn the old way drifts with the
+    # log output and over its neighbours, which is worse than showing
+    # nothing, so nothing is what it gets.
+    return DummyProgressBar()
 
 
 class Downloader:
@@ -393,6 +440,7 @@ class Downloader:
             response=response,
             tmp_file=tmp_file,
             target_file=target_file,
+            head_response=head_response,
             expected_types=expected_types
         )
         if status != Status.Success:
@@ -412,11 +460,14 @@ class Downloader:
     ) -> DownloadResult:
         head_response = await self.get_head_response()
 
+        # Order matters. A text response is reported by its own message
+        # before anything measures it, and the size is only worth comparing
+        # once the response looked like the file we asked for.
         status_checks = [
             check_status_for_message,
             check_status_code,
-            check_status_code,
-            check_content_type
+            check_content_type,
+            check_download_size
         ]
         for check in status_checks:
             result = await self._check_and_return_download_result(
@@ -446,7 +497,7 @@ class Downloader:
         tmp_file: File,
         target_file: File,
         start: int,
-        progressbar: tqdm.tqdm | DummyProgressBar,
+        progressbar: DockedProgressBar | DummyProgressBar,
         force_reload: bool = True
     ) -> DownloadResult:
         headers = self._additional_headers.copy()
@@ -551,6 +602,11 @@ class Downloader:
                     force_reload=force_reload
                 )
         finally:
+            if progressbar is not None:
+                # Its own `with` only covers a stream that opened. Failing
+                # before that would keep the reserved row for good, and
+                # enough failures would leave later downloads without one.
+                progressbar.close()
             await self._handle_tmp_file(
                 tmp_file=tmp_file,
                 supports_resume=supports_resume,

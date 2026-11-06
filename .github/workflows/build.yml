@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+  # Lets the build be exercised without cutting a release. A dispatched run
+  # works the matrix and keeps what it produced as workflow artifacts; it
+  # never touches a release. Everything that writes to a release asks for
+  # both the push event and a v-tag ref: the event alone would let a future
+  # branch push through, the ref alone would let a dispatch aimed at a tag
+  # publish one.
+  workflow_dispatch:
 
 # Required by action-gh-release to create, upload to and publish the release
 permissions:
@@ -15,6 +22,7 @@ env:
 jobs:
   create_release:
     name: Create Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
     - name: Create draft release
@@ -32,52 +40,102 @@ jobs:
   build:
     name: Build packages
     needs: create_release
+    # A skipped dependency would skip this too, so spell out that a skip is
+    # acceptable while a failure or a cancellation is not
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
+      # A broken runner should not hide the state of the others
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             TARGET: linux
             CMD_BUILD: >
                 uv run --locked --extra cryptography pyinstaller --clean -F --hidden-import audible_cli --collect-all cryptography --collect-submodules audible.crypto_provider -n audible -c pyi_entrypoint.py &&
                 cd dist/ &&
-                zip -r9 audible_linux_ubuntu_latest audible
-            OUT_FILE_NAME: audible_linux_ubuntu_latest.zip
+                zip -r9 audible_linux_ubuntu_24_04_x86_64 audible
+            OUT_FILE_NAME: audible_linux_ubuntu_24_04_x86_64.zip
+            LEGACY_NAME: audible_linux_ubuntu_latest.zip
+            EXE: dist/audible
+          - os: ubuntu-24.04-arm
+            TARGET: linux
+            CMD_BUILD: >
+                uv run --locked --extra cryptography pyinstaller --clean -F --hidden-import audible_cli --collect-all cryptography --collect-submodules audible.crypto_provider -n audible -c pyi_entrypoint.py &&
+                cd dist/ &&
+                zip -r9 audible_linux_ubuntu_24_04_arm64 audible
+            OUT_FILE_NAME: audible_linux_ubuntu_24_04_arm64.zip
+            EXE: dist/audible
           - os: ubuntu-22.04
             TARGET: linux
             CMD_BUILD: >
                 uv run --locked --extra cryptography pyinstaller --clean -F --hidden-import audible_cli --collect-all cryptography --collect-submodules audible.crypto_provider -n audible -c pyi_entrypoint.py &&
                 cd dist/ &&
-                zip -r9 audible_linux_ubuntu_22_04 audible
-            OUT_FILE_NAME: audible_linux_ubuntu_22_04.zip
+                zip -r9 audible_linux_ubuntu_22_04_x86_64 audible
+            OUT_FILE_NAME: audible_linux_ubuntu_22_04_x86_64.zip
+            LEGACY_NAME: audible_linux_ubuntu_22_04.zip
+            EXE: dist/audible
+          - os: ubuntu-22.04-arm
+            TARGET: linux
+            CMD_BUILD: >
+                uv run --locked --extra cryptography pyinstaller --clean -F --hidden-import audible_cli --collect-all cryptography --collect-submodules audible.crypto_provider -n audible -c pyi_entrypoint.py &&
+                cd dist/ &&
+                zip -r9 audible_linux_ubuntu_22_04_arm64 audible
+            OUT_FILE_NAME: audible_linux_ubuntu_22_04_arm64.zip
+            EXE: dist/audible
           - os: macos-latest
             TARGET: macos
             CMD_BUILD: >
                 uv run --locked --extra cryptography pyinstaller --clean -F --hidden-import audible_cli --collect-all cryptography --collect-submodules audible.crypto_provider -n audible -c pyi_entrypoint.py &&
                 cd dist/ &&
-                zip -r9 audible_mac audible
-            OUT_FILE_NAME: audible_mac.zip
+                zip -r9 audible_mac_arm64 audible
+            OUT_FILE_NAME: audible_mac_arm64.zip
+            LEGACY_NAME: audible_mac.zip
+            EXE: dist/audible
           - os: macos-latest
             TARGET: macos
             CMD_BUILD: >
                 uv run --locked --extra cryptography pyinstaller --clean -D --hidden-import audible_cli --collect-all cryptography --collect-submodules audible.crypto_provider -n audible -c pyi_entrypoint.py &&
                 cd dist/ &&
-                zip -r9 audible_mac_dir audible
-            OUT_FILE_NAME: audible_mac_dir.zip
+                zip -r9 audible_mac_arm64_dir audible
+            OUT_FILE_NAME: audible_mac_arm64_dir.zip
+            LEGACY_NAME: audible_mac_dir.zip
+            EXE: dist/audible/audible
           - os: windows-latest
             TARGET: windows
             CMD_BUILD: >
                 uv run --locked --extra cryptography pyinstaller --clean -D --hidden-import audible_cli --collect-all cryptography --collect-submodules audible.crypto_provider -n audible -c pyi_entrypoint.py &&
                 cd dist/ &&
-                powershell Compress-Archive audible audible_win_dir.zip
-            OUT_FILE_NAME: audible_win_dir.zip
+                powershell Compress-Archive audible audible_win_x86_64_dir.zip
+            OUT_FILE_NAME: audible_win_x86_64_dir.zip
+            LEGACY_NAME: audible_win_dir.zip
+            EXE: dist/audible/audible.exe
           - os: windows-latest
             TARGET: windows
             CMD_BUILD: >
                 uv run --locked --extra cryptography pyinstaller --clean -F --hidden-import audible_cli --collect-all cryptography --collect-submodules audible.crypto_provider -n audible -c pyi_entrypoint.py &&
                 cd dist/ &&
-                powershell Compress-Archive audible.exe audible_win.zip
-            OUT_FILE_NAME: audible_win.zip
+                powershell Compress-Archive audible.exe audible_win_x86_64.zip
+            OUT_FILE_NAME: audible_win_x86_64.zip
+            LEGACY_NAME: audible_win.zip
+            EXE: dist/audible.exe
+          - os: windows-11-arm
+            TARGET: windows
+            CMD_BUILD: >
+                uv run --locked --extra pycryptodome pyinstaller --clean -D --hidden-import audible_cli --collect-submodules audible.crypto_provider -n audible -c pyi_entrypoint.py &&
+                cd dist/ &&
+                powershell Compress-Archive audible audible_win_arm64_dir.zip
+            OUT_FILE_NAME: audible_win_arm64_dir.zip
+            EXE: dist/audible/audible.exe
+          - os: windows-11-arm
+            TARGET: windows
+            CMD_BUILD: >
+                uv run --locked --extra pycryptodome pyinstaller --clean -F --hidden-import audible_cli --collect-submodules audible.crypto_provider -n audible -c pyi_entrypoint.py &&
+                cd dist/ &&
+                powershell Compress-Archive audible.exe audible_win_arm64.zip
+            OUT_FILE_NAME: audible_win_arm64.zip
+            EXE: dist/audible.exe
+
     steps:
     - uses: actions/checkout@v7
 
@@ -87,13 +145,41 @@ jobs:
         python-version: ${{ env.PYTHON_VERSION }}
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v9.0.0
+      uses: astral-sh/setup-uv@v10.0.1
+      with:
+        # A cache saved under one tag is not readable from another, and a
+        # release only ever runs from a tag, so it would upload caches no
+        # later release can reuse. The duplicate macOS and Windows jobs can
+        # also race for the one key they share.
+        enable-cache: false
 
     - name: Build with pyinstaller for ${{matrix.TARGET}}
       run: ${{matrix.CMD_BUILD}}
 
+    # Nothing here ever started the thing it ships. A build that cannot run
+    # on the machine that produced it has no business reaching a release,
+    # and that is the failure a new runner or architecture produces first.
+    - name: Check that the build runs
+      shell: bash
+      run: |
+        set -euo pipefail
+        out=$("${{ matrix.EXE }}" --help)
+        printf '%s\n' "$out"
+        grep -q '^Usage: audible' <<<"$out"
+
+    # The names gained an architecture, and a /releases/latest/download
+    # link only resolves the exact name it was given. Publishing the same
+    # file twice keeps links that were copied before this change working.
+    # Retires after 15 November 2026, and not before two stable releases
+    # have carried both names.
+    - name: Also stage the retiring name
+      if: matrix.LEGACY_NAME != ''
+      shell: bash
+      run: cp "dist/${{ matrix.OUT_FILE_NAME }}" "dist/${{ matrix.LEGACY_NAME }}"
+
     - name: Upload Release Asset
       id: upload-release-asset
+      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v3
       with:
         files: ./dist/${{ matrix.OUT_FILE_NAME}}
@@ -105,11 +191,31 @@ jobs:
         # from swapping good assets for ones no build step has verified.
         overwrite_files: false
 
+    - name: Upload Release Asset under the retiring name
+      if: >
+        matrix.LEGACY_NAME != '' && github.event_name == 'push'
+        && startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v3
+      with:
+        files: ./dist/${{ matrix.LEGACY_NAME }}
+        draft: true
+        fail_on_unmatched_files: true
+        overwrite_files: false
+
+    - name: Keep the build for inspection
+      if: github.event_name == 'workflow_dispatch'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ matrix.OUT_FILE_NAME }}
+        path: ./dist/${{ matrix.OUT_FILE_NAME }}
+        if-no-files-found: error
+
   publish_release:
     name: Publish Release
-    # Only reached when all six builds succeeded, so a failed matrix leaves
-    # the draft behind instead of a public release with missing assets
+    # Only reached when every build succeeded, so a failed matrix leaves the
+    # draft behind instead of a public release with missing assets
     needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
     - name: Publish the draft release

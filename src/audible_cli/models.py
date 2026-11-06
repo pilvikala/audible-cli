@@ -15,6 +15,8 @@ from audible.client import convert_response_content
 
 from .constants import (
     API_CHAPTER_TYPES,
+    CDE_ATTEMPTS,
+    CDE_FIRST_DELAY,
     CODEC_HIGH_QUALITY,
     CODEC_NORMAL_QUALITY,
     QUALITIES,
@@ -31,12 +33,12 @@ from .utils import (
     LongestSubString,
     full_response_callback,
     parse_api_datetime,
+    request_with_retry,
     to_utc_datetime,
 )
 
 
 logger = logging.getLogger("audible_cli.models")
-
 
 def api_quality(quality: str) -> str:
     """Return what a request sends for this `--quality` value.
@@ -319,7 +321,12 @@ class LibraryItem(BaseItem):
            "key": self.asin,
            "codec": codec_name
         }
-        r = await self._client.session.head(url, params=params)
+        r = await request_with_retry(
+            lambda: self._client.session.head(url, params=params),
+            f"The AAX download url for {self.asin}",
+            attempts=CDE_ATTEMPTS,
+            first_delay=CDE_FIRST_DELAY,
+        )
 
         try:
             link = r.headers["location"]
@@ -478,7 +485,12 @@ class LibraryItem(BaseItem):
             "key": self.asin
         }
 
-        annotations = await self._client.get(url, params=params)
+        annotations = await request_with_retry(
+            lambda: self._client.get(url, params=params),
+            f"The annotations for {self.asin}",
+            attempts=CDE_ATTEMPTS,
+            first_delay=CDE_FIRST_DELAY,
+        )
 
         return annotations
 
@@ -498,6 +510,31 @@ class BaseList:
 
     def __len__(self):
         return len(self._data)
+
+    async def _resolve_podcasts(
+            self,
+            remove_parents: bool = False,
+            **request_params
+    ):
+        """Add the episodes of every parent podcast to this list.
+
+        Shared by the lists that hold library items. The parents stay
+        unless `remove_parents` is asked for: they are ordinary entries to
+        list and to export, and only a download has no use for them,
+        because a parent carries no audio of its own.
+        """
+        podcast_items = await asyncio.gather(
+            *[i.get_child_items(**request_params)
+              for i in self if i.is_parent_podcast()]
+        )
+        for i in podcast_items:
+            self.data.extend(i.data)
+
+        if remove_parents:
+            # Replaced in place rather than removed one at a time: taking
+            # items out of the list being walked moves the rest along under
+            # the walk, and every second parent in a row was stepped over.
+            self.data[:] = [i for i in self if not i.is_parent_podcast()]
 
     def __iter__(self):
         return iter(self._data)
@@ -674,19 +711,20 @@ class Library(BaseList):
              DeprecationWarning,
             stacklevel=2
         )
-        return self.resolve_podcasts(start_date, end_date)
+        return await self.resolve_podcasts(start_date, end_date)
 
     async def resolve_podcasts(
             self,
             start_date: datetime | None = None,
-            end_date: datetime | None = None
+            end_date: datetime | None = None,
+            remove_parents: bool = False
     ):
-        podcast_items = await asyncio.gather(
-            *[i.get_child_items(start_date=start_date, end_date=end_date)
-              for i in self if i.is_parent_podcast()]
+        """Add the episodes of every parent podcast to the library."""
+        await self._resolve_podcasts(
+            remove_parents=remove_parents,
+            start_date=start_date,
+            end_date=end_date
         )
-        for i in podcast_items:
-            self.data.extend(i.data)
 
 
 class Catalog(BaseList):
@@ -745,12 +783,9 @@ class Catalog(BaseList):
 
         return cls(resp, api_client=api_client)
 
-    async def resolve_podcasts(self):
-        podcast_items = await asyncio.gather(
-            *[i.get_child_items() for i in self if i.is_parent_podcast()]
-        )
-        for i in podcast_items:
-            self.data.extend(i.data)
+    async def resolve_podcasts(self, remove_parents: bool = False):
+        """Add the episodes of every parent podcast to the catalog."""
+        await self._resolve_podcasts(remove_parents=remove_parents)
 
 
 class Wishlist(BaseList):

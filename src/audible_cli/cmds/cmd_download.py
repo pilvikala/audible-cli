@@ -1,6 +1,7 @@
 import asyncio
 import asyncio.log
 import asyncio.sslproto
+import glob
 import json
 import logging
 import pathlib
@@ -11,9 +12,15 @@ import click
 import httpx
 import questionary
 from audible.exceptions import NotFoundError
-from click import echo
 
-from ..constants import API_CHAPTER_TYPES, CLI_CHAPTER_TYPE_CONFIG, QUALITIES
+from .._dialog import selection_output
+from ..constants import (
+    AAX_CONTENT_TYPES,
+    AAXC_CONTENT_TYPES,
+    API_CHAPTER_TYPES,
+    CLI_CHAPTER_TYPE_CONFIG,
+    QUALITIES,
+)
 from ..decorators import (
     bunch_size_option,
     end_date_option,
@@ -33,6 +40,7 @@ from ..exceptions import (
     VoucherNeedRefresh,
 )
 from ..models import Library
+from ..progress import advance_summary, docked_progress, grow_summary_total
 from ..utils import Downloader, datetime_type
 
 
@@ -165,6 +173,17 @@ class DownloadCounter:
 counter = DownloadCounter()
 
 
+def enqueue(cmd, kwargs) -> None:
+    """Put one job on the queue and let the running total know.
+
+    A book that has to be fetched in parts discovers its jobs while the
+    queue is already draining, so the total taken at the start would be
+    short by exactly those.
+    """
+    QUEUE.put_nowait((cmd, kwargs))
+    grow_summary_total()
+
+
 async def download_cover(
         client, output_dir, base_filename, item, res, overwrite_existing
 ):
@@ -173,7 +192,9 @@ async def download_cover(
 
     url = item.get_cover_url(res)
     if url is None:
-        logger.error("No COVER with size %s found for %s", res, item.full_title)
+        # A step above the other "nothing to fetch" cases here: this size
+        # was asked for.
+        logger.warning("No COVER with size %s found for %s", res, item.full_title)
         return
 
     dl = Downloader(url, filepath, client, overwrite_existing, "image/jpeg")
@@ -327,9 +348,7 @@ async def download_aax(
     dl = NewDownloader(
         source=url,
         client=client,
-        expected_types=[
-            "audio/aax", "audio/vnd.audible.aax", "audio/audible", "audio/mp4"
-        ]
+        expected_types=list(AAX_CONTENT_TYPES)
     )
     downloaded = await dl.run(target=filepath, force_reload=overwrite_existing)
 
@@ -405,6 +424,41 @@ async def _reuse_voucher(lr_file, item):
     return lr, url, codec
 
 
+def _finished_downloads(output_dir, base_filename, item, quality):
+    """What an earlier attempt at this title may have left behind.
+
+    Worth guessing because it saves a license request, and a license costs
+    a voucher whether or not anything is found. `_get_codec` knows the AAXC
+    name up front, but a podcast episode has no codec until its license
+    arrives, so every run used to buy one for an episode already on disk.
+    A voucher counts as a find: a download that died after writing it can
+    reuse that license.
+    """
+    folder = pathlib.Path(output_dir)
+    codec, _ = item._get_codec(quality)
+    if codec is not None:
+        yield folder / f"{base_filename}-{codec}.aaxc"
+        return
+
+    # The name is `<title>-<format>` and a format carries no hyphen, so the
+    # last one separates them. A wildcard cannot say "exactly one segment"
+    # and would let `Foo` claim `Foo-Bar-MPEG.mp3`, so both halves are
+    # compared, the format in whatever casing Audible used. The title is
+    # escaped because brackets in it would read as a character class.
+    seen = set()
+    escaped = glob.escape(base_filename)
+    for found in sorted(folder.glob(f"{escaped}-*.mp3")) + sorted(
+        folder.glob(f"{escaped}-*.voucher")
+    ):
+        title, _, content_format = found.stem.rpartition("-")
+        if title != base_filename or content_format.lower() != "mpeg":
+            continue
+        candidate = found.with_suffix(".mp3")
+        if candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+
+
 async def download_aaxc(
     client, output_dir, base_filename, item, quality, overwrite_existing,
     filename_mode, filename_length
@@ -413,10 +467,7 @@ async def download_aaxc(
 
     # https://github.com/mkb79/audible-cli/issues/60
     if not overwrite_existing:
-        codec, _ = item._get_codec(quality)
-        if codec is not None:
-            filepath = pathlib.Path(
-                output_dir) / f"{base_filename}-{codec}.aaxc"
+        for filepath in _finished_downloads(output_dir, base_filename, item, quality):
             lr_file = filepath.with_suffix(".voucher")
 
             if lr_file.is_file():
@@ -439,6 +490,7 @@ async def download_aaxc(
                         lr_file
                     )
                     overwrite_existing = True
+                break
 
     is_aycl = item.benefit_id == "AYCL"
 
@@ -469,10 +521,7 @@ async def download_aaxc(
     dl = NewDownloader(
         source=url,
         client=client,
-        expected_types=[
-            "audio/aax", "audio/vnd.audible.aax", "audio/mpeg", "audio/x-m4a",
-            "audio/audible", "audio/mp4"
-        ],
+        expected_types=list(AAXC_CONTENT_TYPES),
     )
     downloaded = await dl.run(target=filepath, force_reload=overwrite_existing)
 
@@ -541,9 +590,23 @@ async def consume(run: DownloadRun):
 
             await cmd(**kwargs)
         except Exception as e:
-            logger.error(e)
+            # The bare exception names neither the title nor the kind of
+            # file, which leaves nothing to act on.
+            item = kwargs.get("item")
+            logger.error(
+                "%s failed for %s (%s): %s: %s",
+                cmd.__name__,
+                getattr(item, "full_title", "unknown title"),
+                getattr(item, "asin", "unknown asin"),
+                type(e).__name__,
+                e,
+            )
             run.record(e)
         finally:
+            # Counted whether it ran, failed or was skipped after an abort:
+            # the summary tracks how much of the queue is behind us, not how
+            # much of it succeeded.
+            advance_summary()
             QUEUE.task_done()
 
 
@@ -614,7 +677,7 @@ def queue_job(
                 "res": cover_size,
                 "overwrite_existing": overwrite_existing
             }
-            QUEUE.put_nowait((cmd, kwargs))
+            enqueue(cmd, kwargs)
 
     if get_pdf:
         cmd = download_pdf
@@ -625,7 +688,7 @@ def queue_job(
             "item": item,
             "overwrite_existing": overwrite_existing
         }
-        QUEUE.put_nowait((cmd, kwargs))
+        enqueue(cmd, kwargs)
 
     if get_chapters:
         cmd = download_chapters
@@ -637,7 +700,7 @@ def queue_job(
             "overwrite_existing": overwrite_existing,
             "chapter_type": chapter_type
         }
-        QUEUE.put_nowait((cmd, kwargs))
+        enqueue(cmd, kwargs)
 
     if get_annotation:
         cmd = download_annotations
@@ -647,7 +710,7 @@ def queue_job(
             "item": item,
             "overwrite_existing": overwrite_existing
         }
-        QUEUE.put_nowait((cmd, kwargs))
+        enqueue(cmd, kwargs)
 
     if get_aax:
         cmd = download_aax
@@ -662,7 +725,7 @@ def queue_job(
             "filename_mode": filename_mode,
             "filename_length": filename_length
         }
-        QUEUE.put_nowait((cmd, kwargs))
+        enqueue(cmd, kwargs)
 
     if get_aaxc:
         cmd = download_aaxc
@@ -676,12 +739,12 @@ def queue_job(
             "filename_mode": filename_mode,
             "filename_length": filename_length
         }
-        QUEUE.put_nowait((cmd, kwargs))
+        enqueue(cmd, kwargs)
 
 
 def display_counter():
     if counter.has_downloads():
-        echo("The download ended with the following result:")
+        logger.info("The download ended with the following result:")
         for k, v in counter.as_dict().items():
             if v == 0:
                 continue
@@ -693,11 +756,11 @@ def display_counter():
             elif k == "voucher":
                 diff = v - counter.voucher_saved
                 if diff > 0:
-                    echo(f"Unsaved voucher: {diff}")
+                    logger.info("Unsaved voucher: %s", diff)
                 continue
-            echo(f"New {k} files: {v}")
+            logger.info("New %s files: %s", k, v)
     else:
-        echo("No new files downloaded.")
+        logger.info("No new files downloaded.")
 
 
 @click.command("download")
@@ -805,6 +868,11 @@ def display_counter():
     help="number of simultaneous downloads"
 )
 @click.option(
+    "--no-progress",
+    is_flag=True,
+    help="do not show progress bars"
+)
+@click.option(
     "--filename-mode", "-f",
     type=click.Choice(
         ["config", "ascii", "asin_ascii", "unicode", "asin_unicode", "asin_only"]
@@ -884,6 +952,7 @@ async def cli(session, api_client, **params):
 
     # additional options
     sim_jobs = params.get("jobs")
+    show_progress = not params.get("no_progress")
     quality = params.get("quality")
     cover_sizes = list(set(params.get("cover_size")))
     overwrite_existing = params.get("overwrite")
@@ -943,8 +1012,11 @@ async def cli(session, api_client, **params):
     )
 
     if resolve_podcasts:
-        await library.resolve_podcasts(start_date=start_date, end_date=end_date)
-        [library.data.remove(i) for i in library if i.is_parent_podcast()]
+        # The parents go: they are what the episodes came from, and a
+        # parent has no audio of its own to download.
+        await library.resolve_podcasts(
+            start_date=start_date, end_date=end_date, remove_parents=True
+        )
 
     # collect jobs
     jobs = []
@@ -981,7 +1053,8 @@ async def cli(session, api_client, **params):
 
                 answer = await questionary.checkbox(
                     f"Found the following matches for '{title}'. Which you want to download?",
-                    choices=choices
+                    choices=choices,
+                    output=selection_output(),
                 ).unsafe_ask_async()
                 if answer is not None:
                     [jobs.append(i) for i in answer]
@@ -1039,5 +1112,8 @@ async def cli(session, api_client, **params):
 
     # schedule the consumer
     run = DownloadRun(ignore_errors)
-    await drain_queue(run, sim_jobs)
+    # One reserved row per consumer, which is the most bars that can be
+    # alive at once, plus one for the running total.
+    with docked_progress(sim_jobs, enabled=show_progress, total=QUEUE.qsize()):
+        await drain_queue(run, sim_jobs)
     run.raise_for_errors()
